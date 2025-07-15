@@ -1,231 +1,189 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { supabase } from "./lib/supabase.js";
 
-const NWS_API_BASE = "https://api.weather.gov";
-const USER_AGENT = "weather-app/1.0";
+// Define interfaces for the schema
+interface Page {
+    id: string;
+    title: string;
+    content: string;
+}
 
-// Create server instance
+interface SidebarItem {
+    id: string;
+    label: string;
+    active: boolean;
+}
+
+interface State {
+    pages: Page[];
+    sidebar: SidebarItem[];
+}
+
+// Define interface for the tool parameters
+interface AddItemParams {
+    item: {
+        id: string;
+        label?: string;
+        title?: string;
+        content?: string;
+        active?: boolean;
+    };
+}
+
+// Define interface for the tool response
+interface ToolResponse {
+    content: Array<{
+        type: "text";
+        text: string;
+    }>;
+}
+
 const server = new McpServer({
-    name: "weather",
+    name: "Cms Application",
     version: "1.0.0",
-    capabilities: {
-        resources: {},
-        tools: {},
-    },
+    description: "A server for managing page data",
+    schema: z.object({
+        pages: z.array(
+            z.object({
+                id: z.string(),
+                title: z.string(),
+                content: z.string(),
+            })
+        ),
+        sidebar: z.array(
+            z.object({
+                id: z.string(),
+                label: z.string(),
+                active: z.boolean(),
+            })
+        ),
+    }),
 });
 
-// Helper function for making NWS API requests
-async function makeNWSRequest<T>(url: string): Promise<T | null> {
-    const headers = {
-        "User-Agent": USER_AGENT,
-        Accept: "application/geo+json",
-    };
+// @ts-ignore
+server.tool(
+    "addItem",
+    "Add a new item to both sidebar and pages",
+    {
+        item: z.object({
+            id: z.string().describe("Unique identifier for the item"),
+            label: z.string().optional().describe("Label for sidebar item (optional)"),
+            title: z.string().optional().describe("Title for page item (optional)"),
+            content: z.string().optional().describe("Content for page item (optional)"),
+            active: z.boolean().optional().describe("Active status for sidebar item (optional)"),
+        }),
+    },
+    async ({ item }: AddItemParams): Promise<ToolResponse> => {
+        try {
+            // Load current config from Supabase
+            const { data, error } = await supabase
+                .from("configs")
+                .select("config")
+                .single();
 
-    try {
-        const response = await fetch(url, { headers });
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
+            if (error) {
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Failed to load config from database: ${error.message}`,
+                        },
+                    ],
+                };
+            }
+
+            // Parse the current config
+            const currentConfig: State = data.config || { pages: [], sidebar: [] };
+
+            // Validate sidebar item
+            const sidebarItem: SidebarItem = {
+                id: item.id,
+                label: item.label ?? `Item ${item.id}`,
+                active: item.active ?? false,
+            };
+
+            // Validate page item
+            const pageItem: Page = {
+                id: item.id,
+                title: item.title ?? `Page ${item.id}`,
+                content: item.content ?? "",
+            };
+
+            // Check for duplicate IDs in both arrays
+            if (currentConfig.sidebar.some((existing: SidebarItem) => existing.id === item.id)) {
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Failed to add item: Sidebar item with ID ${item.id} already exists`,
+                        },
+                    ],
+                };
+            }
+            if (currentConfig.pages.some((existing: Page) => existing.id === item.id)) {
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Failed to add item: Page with ID ${item.id} already exists`,
+                        },
+                    ],
+                };
+            }
+
+            // Add to both sidebar and pages
+            currentConfig.sidebar.push(sidebarItem);
+            currentConfig.pages.push(pageItem);
+
+            // Update the config in Supabase where id = 1
+            const { error: updateError } = await supabase
+                .from("configs")
+                .update({ config: currentConfig })
+                .eq("id", 1);
+
+            if (updateError) {
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Failed to update config in database: ${updateError.message}`,
+                        },
+                    ],
+                };
+            }
+
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: `Successfully added item with ID ${item.id} to both sidebar and pages and updated database:\n` +
+                            `Sidebar Item:\n${JSON.stringify(sidebarItem, null, 2)}\n` +
+                            `Page:\n${JSON.stringify(pageItem, null, 2)}`,
+                    },
+                ],
+            };
+        } catch (error: any) {
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: `Failed to add item: ${error.message}`,
+                    },
+                ],
+            };
         }
-        return (await response.json()) as T;
-    } catch (error) {
-        console.error("Error making NWS request:", error);
-        return null;
     }
-}
-
-interface AlertFeature {
-    properties: {
-        event?: string;
-        areaDesc?: string;
-        severity?: string;
-        status?: string;
-        headline?: string;
-    };
-}
-
-// Format alert data
-function formatAlert(feature: AlertFeature): string {
-    const props = feature.properties;
-    return [
-        `Event: ${props.event || "Unknown"}`,
-        `Area: ${props.areaDesc || "Unknown"}`,
-        `Severity: ${props.severity || "Unknown"}`,
-        `Status: ${props.status || "Unknown"}`,
-        `Headline: ${props.headline || "No headline"}`,
-        "---",
-    ].join("\n");
-}
-
-interface ForecastPeriod {
-    name?: string;
-    temperature?: number;
-    temperatureUnit?: string;
-    windSpeed?: string;
-    windDirection?: string;
-    shortForecast?: string;
-}
-
-interface AlertsResponse {
-    features: AlertFeature[];
-}
-
-interface PointsResponse {
-    properties: {
-        forecast?: string;
-    };
-}
-
-interface ForecastResponse {
-    properties: {
-        periods: ForecastPeriod[];
-    };
-}
-
-// Register weather tools
-server.tool(
-    "get-alerts",
-    "Get weather alerts for a state",
-    {
-        state: z.string().length(2).describe("Two-letter state code (e.g. CA, NY)"),
-    },
-    async ({ state }) => {
-        const stateCode = state.toUpperCase();
-        const alertsUrl = `${NWS_API_BASE}/alerts?area=${stateCode}`;
-        const alertsData = await makeNWSRequest<AlertsResponse>(alertsUrl);
-
-        if (!alertsData) {
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: "Failed to retrieve alerts data",
-                    },
-                ],
-            };
-        }
-
-        const features = alertsData.features || [];
-        if (features.length === 0) {
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `No active alerts for ${stateCode}`,
-                    },
-                ],
-            };
-        }
-
-        const formattedAlerts = features.map(formatAlert);
-        const alertsText = `Active alerts for ${stateCode}:\n\n${formattedAlerts.join("\n")}`;
-
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: alertsText,
-                },
-            ],
-        };
-    },
 );
 
-server.tool(
-    "get-forecast",
-    "Get weather forecast for a location",
-    {
-        latitude: z.number().min(-90).max(90).describe("Latitude of the location"),
-        longitude: z
-            .number()
-            .min(-180)
-            .max(180)
-            .describe("Longitude of the location"),
-    },
-    async ({ latitude, longitude }) => {
-        // Get grid point data
-        const pointsUrl = `${NWS_API_BASE}/points/${latitude.toFixed(4)},${longitude.toFixed(4)}`;
-        const pointsData = await makeNWSRequest<PointsResponse>(pointsUrl);
-
-        if (!pointsData) {
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Failed to retrieve grid point data for coordinates: ${latitude}, ${longitude}. This location may not be supported by the NWS API (only US locations are supported).`,
-                    },
-                ],
-            };
-        }
-
-        const forecastUrl = pointsData.properties?.forecast;
-        if (!forecastUrl) {
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: "Failed to get forecast URL from grid point data",
-                    },
-                ],
-            };
-        }
-
-        // Get forecast data
-        const forecastData = await makeNWSRequest<ForecastResponse>(forecastUrl);
-        if (!forecastData) {
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: "Failed to retrieve forecast data",
-                    },
-                ],
-            };
-        }
-
-        const periods = forecastData.properties?.periods || [];
-        if (periods.length === 0) {
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: "No forecast periods available",
-                    },
-                ],
-            };
-        }
-
-        // Format forecast periods
-        const formattedForecast = periods.map((period: ForecastPeriod) =>
-            [
-                `${period.name || "Unknown"}:`,
-                `Temperature: ${period.temperature || "Unknown"}°${period.temperatureUnit || "F"}`,
-                `Wind: ${period.windSpeed || "Unknown"} ${period.windDirection || ""}`,
-                `${period.shortForecast || "No forecast available"}`,
-                "---",
-            ].join("\n"),
-        );
-
-        const forecastText = `Forecast for ${latitude}, ${longitude}:\n\n${formattedForecast.join("\n")}`;
-
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: forecastText,
-                },
-            ],
-        };
-    },
-);
-
-async function main() {
+async function main(): Promise<void> {
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error("Weather MCP Server running on stdio");
+    console.error("CMS MCP Server running on stdio");
 }
 
-main().catch((error) => {
+main().catch((error: any) => {
     console.error("Fatal error in main():", error);
     process.exit(1);
 });
