@@ -25,9 +25,13 @@
   },
   "homepage": "https://github.com/Narw0x/mcpServer#readme",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.15.1",
-    "@supabase/supabase-js": "^2.51.0",
+    "@modelcontextprotocol/sdk": "^1.16.0",
+    "@supabase/supabase-js": "^2.52.0",
+    "ajv": "^8.17.1",
+    "body-parser": "^2.2.0",
+    "cors": "^2.8.5",
     "dotenv": "^17.2.0",
+    "express": "^5.1.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {
